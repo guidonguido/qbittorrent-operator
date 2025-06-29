@@ -54,10 +54,10 @@ type TorrentStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-//+kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
-//+kubebuilder:printcolumn:name="Name",type="string",JSONPath=".status.name"
-//+kubebuilder:printcolumn:name="Size",type="string",JSONPath=".status.total_size"
-//+kubebuilder:printcolumn:name="Progress",type="string",JSONPath=".status.amount_left"
+// +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
+// +kubebuilder:printcolumn:name="Name",type="string",JSONPath=".status.name"
+// +kubebuilder:printcolumn:name="Size",type="string",JSONPath=".status.total_size"
+// +kubebuilder:printcolumn:name="Progress",type="string",JSONPath=".status.amount_left"
 
 // Torrent is the Schema for the torrents API.
 type Torrent struct {

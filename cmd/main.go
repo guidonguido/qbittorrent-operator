@@ -90,8 +90,10 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&qbittorrentURL, "qbittorrent-url", "", "The URL of the qBittorrent server.")
-	flag.StringVar(&qbittorrentUsername, "qbittorrent-username", "", "The username for logging into the qBittorrent server.")
-	flag.StringVar(&qbittorrentPassword, "qbittorrent-password", "", "The password for logging into the qBittorrent server.")
+	flag.StringVar(&qbittorrentUsername, "qbittorrent-username", "",
+		"The username for logging into the qBittorrent server.")
+	flag.StringVar(&qbittorrentPassword, "qbittorrent-password", "",
+		"The password for logging into the qBittorrent server.")
 	opts := zap.Options{
 		Development: true,
 	}

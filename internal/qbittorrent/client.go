@@ -65,7 +65,12 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 		logger.Error(err, "Failed to login to qbittorrent")
 		return fmt.Errorf("failed to login to qbittorrent: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logger.Error(err, "Failed to close response body")
+		}
+	}()
 
 	// check for non-200 status code
 	if resp.StatusCode != http.StatusOK {
@@ -121,7 +126,12 @@ func (c *Client) GetTorrentsInfo(ctx context.Context) ([]TorrentInfo, error) {
 		logger.Error(err, "Failed to get torrents info list")
 		return nil, fmt.Errorf("failed to get torrents info list: %w", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logger.Error(err, "Failed to close response body")
+		}
+	}()
 
 	// check for non-200 status code
 	if resp.StatusCode != http.StatusOK {
@@ -187,17 +197,27 @@ func (c *Client) AddTorrent(ctx context.Context, magnetURI string) error {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	writer.WriteField("urls", magnetURI)
+	if err := writer.WriteField("urls", magnetURI); err != nil {
+		logger.Error(err, "Failed to write form field")
+		return fmt.Errorf("failed to write form field: %w", err)
+	}
+
 	urlFields, err := writer.CreateFormField("urls")
 	if err != nil {
 		logger.Error(err, "Failed to create form field")
 		return fmt.Errorf("failed to create form field: %w", err)
 	}
 
-	_, err = urlFields.Write([]byte(magnetURI))
+	if _, err := urlFields.Write([]byte(magnetURI)); err != nil {
+		logger.Error(err, "Failed to write form field")
+		return fmt.Errorf("failed to write form field: %w", err)
+	}
 
 	// Close the writer to finalize the form data
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		logger.Error(err, "Failed to close writer")
+		return fmt.Errorf("failed to close writer: %w", err)
+	}
 
 	req, err := http.NewRequest("POST", torrentsAddURL, body)
 	if err != nil {
@@ -216,7 +236,11 @@ func (c *Client) AddTorrent(ctx context.Context, magnetURI string) error {
 		logger.Error(err, "Failed to add torrent")
 		return fmt.Errorf("failed to add torrent: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logger.Error(err, "Failed to close response body")
+		}
+	}()
 
 	// check for non-200 status code
 	if resp.StatusCode != http.StatusOK {
@@ -273,7 +297,11 @@ func (c *Client) DeleteTorrent(ctx context.Context, hash string, deleteFiles boo
 		logger.Error(err, "Failed to delete torrent")
 		return fmt.Errorf("failed to delete torrent: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logger.Error(err, "Failed to close response body")
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Error(nil, "Failed to delete torrent",
