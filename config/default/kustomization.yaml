@@ -55,7 +55,7 @@ patches:
 #- ../network-policy
 
 # Uncomment the patches line if you enable Metrics
-# [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443.
+# [METRICS] The following patch will enable the metrics endpoint using HTTP and the port :8080.
 # More info: https://book.kubebuilder.io/reference/metrics
 
 # Uncomment the patches line if you enable Metrics and CertManager
