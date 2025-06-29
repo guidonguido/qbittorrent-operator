@@ -1,6 +1,8 @@
 # qBittorrent Operator
 
-A Kubernetes operator that manages qBittorrent torrents through Custom Resource Definitions (CRDs). This operator allows you to declaratively manage torrents in qBittorrent using native Kubernetes resources.
+A Kubernetes operator that manages qBittorrent Torrent instances through Custom Resource Definitions (CRDs). This operator allows you to declaratively manage Torrents in qBittorrent using native Kubernetes resources, so you are not forced to interact with the UI.
+
+Check the [Complete Setup Guide](#complete-setup-guide) to build a full-functioning environment.
 
 ## Table of Contents
 
@@ -328,7 +330,7 @@ spec:
     spec:
       containers:
       - name: qbittorrent
-        image: lscr.io/linuxserver/qbittorrent:latest
+        image: lscr.io/linuxserver/qbittorrent:5.1.1
         ports:
         - name: qbittorrent
           containerPort: 8080
