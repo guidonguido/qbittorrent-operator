@@ -480,6 +480,109 @@ The operator exposes Prometheus metrics on `:8080/metrics`:
 - `controller_runtime_reconcile_errors_total` - Reconciliation errors
 - `controller_runtime_reconcile_time_seconds` - Reconciliation duration
 
+### ServiceMonitor Setup
+
+To enable Prometheus scraping of the operator metrics, follow these steps:
+
+#### 1. Enable Prometheus Resources
+
+Uncomment the Prometheus resources in `config/default/kustomization.yaml`:
+
+```yaml
+# [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
+- ../prometheus
+```
+
+#### 2. Configure ServiceMonitor
+
+Edit `config/prometheus/monitor.yaml` to match your Prometheus setup:
+
+```yaml
+# Prometheus Monitor Service (Metrics)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    release: prometheus-stack  # Match your Prometheus operator release
+    control-plane: controller-manager
+    app.kubernetes.io/name: qbittorrent-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: controller-manager-metrics-monitor
+  namespace: system
+spec:
+  endpoints:
+    - path: /metrics
+      interval: 30s                # Scrape interval
+      scrapeTimeout: 30s           # Scrape timeout
+      port: http                   # Port name from metrics service
+      scheme: http                 # HTTP (not HTTPS)
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      honorLabels: true            # Preserve metric labels
+  namespaceSelector:
+    matchNames:
+      - observability              # Target namespace for monitoring
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: qbittorrent-operator
+```
+
+#### 3. Common Configuration Options
+
+**For kube-prometheus-stack:**
+```yaml
+metadata:
+  labels:
+    release: prometheus-stack  # or your Helm release name
+```
+
+**For different Prometheus namespace:**
+```yaml
+namespaceSelector:
+  matchNames:
+    - your-prometheus-namespace  # e.g., monitoring, prometheus, observability
+```
+
+**For Prometheus without namespace selector:**
+```yaml
+# Remove namespaceSelector entirely for cluster-wide discovery
+namespaceSelector: {}
+```
+
+#### 4. Deploy with Monitoring
+
+```bash
+# Deploy the operator with ServiceMonitor
+kubectl apply -k config/default
+
+# Verify ServiceMonitor creation
+kubectl get servicemonitor -n qbittorrent-operator-system
+
+# Check if Prometheus discovers the target
+kubectl port-forward svc/prometheus-operated 9090:9090 -n observability
+# Then visit http://localhost:9090/targets
+```
+
+#### 5. Verify Metrics Collection
+
+Once deployed, verify that Prometheus is collecting metrics:
+
+1. **Check Targets**: In Prometheus UI → Status → Targets
+   - Look for `qbittorrent-operator-controller-manager-metrics-monitor`
+   - Status should be "UP"
+
+2. **Query Metrics**: Try these queries in Prometheus:
+   ```promql
+   # Controller reconciliation rate
+   rate(controller_runtime_reconcile_total[5m])
+   
+   # Error rate
+   rate(controller_runtime_reconcile_errors_total[5m])
+   
+   # Reconciliation duration
+   histogram_quantile(0.95, rate(controller_runtime_reconcile_time_seconds_bucket[5m]))
+   ```
+
 ### Logging
 
 Operator logs include structured information:

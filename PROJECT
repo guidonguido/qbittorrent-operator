@@ -6,6 +6,8 @@ cliVersion: 4.6.0
 domain: qbittorrent.io
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  grafana.kubebuilder.io/v1-alpha: {}
 projectName: qbittorrent-operator
 repo: github.com/guidonguido/qbittorrent-operator
 resources:

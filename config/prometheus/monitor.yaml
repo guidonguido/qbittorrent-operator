@@ -3,6 +3,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   labels:
+    # release: prometheus-stack
     control-plane: controller-manager
     app.kubernetes.io/name: qbittorrent-operator
     app.kubernetes.io/managed-by: kustomize
@@ -11,16 +12,22 @@ metadata:
 spec:
   endpoints:
     - path: /metrics
-      port: https # Ensure this is the name of the port that exposes HTTPS metrics
-      scheme: https
+      interval: 30s
+      scrapeTimeout: 30s
+      port: http
+      scheme: http
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-      tlsConfig:
+      honorLabels: true
+      # tlsConfig:
         # TODO(user): The option insecureSkipVerify: true is not recommended for production since it disables
         # certificate verification, exposing the system to potential man-in-the-middle attacks.
         # For production environments, it is recommended to use cert-manager for automatic TLS certificate management.
         # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
         # which securely references the certificate from the 'metrics-server-cert' secret.
-        insecureSkipVerify: true
+        # insecureSkipVerify: true
+  namespaceSelector:
+    matchNames:
+      - qbittorrent-operator
   selector:
     matchLabels:
       control-plane: controller-manager
