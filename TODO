@@ -1,0 +1,7 @@
+TODO:
+- CR to handle qBittorrent deployment
+- Helm Chart
+
+IDEAS:
+- CR that does not need a running qBittorrent instance, but instead spins up a new one to download the specified torrent
+- Possibility do upload the specified torrent on a S3 storage or cloud storage
