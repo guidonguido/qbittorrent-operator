@@ -3,7 +3,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   labels:
-    # release: prometheus-stack
+    release: prometheus-stack
     control-plane: controller-manager
     app.kubernetes.io/name: qbittorrent-operator
     app.kubernetes.io/managed-by: kustomize

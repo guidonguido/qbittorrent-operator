@@ -37,14 +37,25 @@ type TorrentInfo struct {
 	TimeActive  int64  `json:"time_active"`
 }
 
-// NewClient creates a new qbittorrent client
+// NewClient creates a new qbittorrent client with a default 5s timeout.
 func NewClient(baseURL string) *Client {
+	return NewClientWithTimeout(baseURL, 5*time.Second)
+}
+
+// NewClientWithTimeout creates a new qbittorrent client with a configurable timeout.
+func NewClientWithTimeout(baseURL string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: timeout,
 		},
 	}
+}
+
+// Ping checks connectivity by attempting to list torrents.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.GetTorrentsInfo(ctx)
+	return err
 }
 
 // Authenticate with qbittorrent and store the session ID

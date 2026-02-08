@@ -20,24 +20,33 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // TorrentSpec defines the desired state of Torrent.
-// This is what users will define in their YAML
 type TorrentSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// MagnetURI is the magnet link for the torrent to download.
+	// +kubebuilder:validation:Required
+	MagnetURI string `json:"magnet_uri"`
 
-	MagnetURI string `json:"magnet_uri,omitempty"`
+	// ClientConfigRef is an explicit reference to a TorrentClientConfiguration in the same namespace.
+	// If not set, the controller will auto-discover a TCC in the namespace
+	// (exactly one must exist for auto-discovery to succeed).
+	// +optional
+	ClientConfigRef *LocalObjectReference `json:"clientConfigRef,omitempty"`
+
+	// DeleteFilesOnRemoval controls whether downloaded files are deleted
+	// when the Torrent resource is deleted.
+	// +kubebuilder:default=true
+	// +optional
+	DeleteFilesOnRemoval *bool `json:"deleteFilesOnRemoval,omitempty"`
+}
+
+// LocalObjectReference is a reference to an object in the same namespace.
+type LocalObjectReference struct {
+	// Name of the referenced object.
+	Name string `json:"name"`
 }
 
 // TorrentStatus defines the observed state of Torrent.
-// This is what the operator updates
 type TorrentStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	ContentPath string `json:"content_path,omitempty"`
 	AddedOn     int64  `json:"added_on,omitempty"`
 	State       string `json:"state,omitempty"`
@@ -47,13 +56,16 @@ type TorrentStatus struct {
 	AmountLeft  int64  `json:"amount_left,omitempty"`
 	Hash        string `json:"hash,omitempty"`
 
-	// Conditions represent the latest available observations of a torrent's current state
-	// Standard Kubernetes pattern for representing status
+	// ClientConfigurationName is the resolved TCC name being used.
+	ClientConfigurationName string `json:"clientConfigurationName,omitempty"`
+
+	// Conditions represent the latest available observations of a torrent's current state.
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=to
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
 // +kubebuilder:printcolumn:name="Name",type="string",JSONPath=".status.name"
 // +kubebuilder:printcolumn:name="Size",type="string",JSONPath=".status.total_size"

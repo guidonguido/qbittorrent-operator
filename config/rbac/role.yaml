@@ -5,9 +5,33 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - torrent.qbittorrent.io
+  - ""
   resources:
-  - torrents
+  - persistentvolumeclaims
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
   verbs:
   - create
   - delete
@@ -19,13 +43,31 @@ rules:
 - apiGroups:
   - torrent.qbittorrent.io
   resources:
+  - torrentclientconfigurations
+  - torrents
+  - torrentservers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - torrent.qbittorrent.io
+  resources:
+  - torrentclientconfigurations/finalizers
   - torrents/finalizers
+  - torrentservers/finalizers
   verbs:
   - update
 - apiGroups:
   - torrent.qbittorrent.io
   resources:
+  - torrentclientconfigurations/status
   - torrents/status
+  - torrentservers/status
   verbs:
   - get
   - patch

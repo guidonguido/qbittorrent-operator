@@ -20,4 +20,22 @@ resources:
   kind: Torrent
   path: github.com/guidonguido/qbittorrent-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: qbittorrent.io
+  group: torrent
+  kind: TorrentServer
+  path: github.com/guidonguido/qbittorrent-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: qbittorrent.io
+  group: torrent
+  kind: TorrentClientConfiguration
+  path: github.com/guidonguido/qbittorrent-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

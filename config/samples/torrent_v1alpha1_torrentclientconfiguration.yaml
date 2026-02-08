@@ -1,0 +1,15 @@
+# Example: Manual TCC for an external qBittorrent server (not managed by TorrentServer)
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: TorrentClientConfiguration
+metadata:
+  labels:
+    app.kubernetes.io/name: qbittorrent-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: external-qbittorrent
+  namespace: qbittorrent-operator
+spec:
+  url: "http://qbittorrent.media-server.svc.cluster.local:8080"
+  credentialsSecret:
+    name: qbittorrent-credentials
+  timeout: "10s"
+  checkInterval: "60s"

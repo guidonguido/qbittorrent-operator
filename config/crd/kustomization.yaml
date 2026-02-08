@@ -3,6 +3,8 @@
 # It should be run by config/default
 resources:
 - bases/torrent.qbittorrent.io_torrents.yaml
+- bases/torrent.qbittorrent.io_torrentservers.yaml
+- bases/torrent.qbittorrent.io_torrentclientconfigurations.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
