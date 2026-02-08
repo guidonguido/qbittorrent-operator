@@ -2,7 +2,7 @@
 
 A Kubernetes operator that manages qBittorrent server deployments and torrent downloads through Custom Resource Definitions (CRDs). Deploy a fully managed qBittorrent instance and declaratively manage torrents — no manual UI interaction required.
 
-Check the [Complete Setup Guide](#complete-setup-guide) for a full working environment.
+Check the [Usage Examples](#usage-examples) for a full working environment.
 
 ## Table of Contents
 
@@ -12,7 +12,6 @@ Check the [Complete Setup Guide](#complete-setup-guide) for a full working envir
 - [qBittorrent API Reference](#qbittorrent-api-reference)
 - [Installation](#installation)
 - [Usage Examples](#usage-examples)
-- [Complete Setup Guide](#complete-setup-guide)
 - [Monitoring](#monitoring)
 - [Troubleshooting](#troubleshooting)
 
@@ -21,29 +20,18 @@ Check the [Complete Setup Guide](#complete-setup-guide) for a full working envir
 The qBittorrent Operator introduces three Custom Resource Definitions that work together:
 
 1. **TorrentServer** (`ts`) — Deploys and manages a qBittorrent server instance (Deployment, Service, PVC, credentials Secret), and automatically creates a TorrentClientConfiguration for it.
-2. **TorrentClientConfiguration** (`tcc`) — Holds connection details (URL + credentials) for a qBittorrent instance. Created automatically by TorrentServer, or manually for external servers.
-3. **Torrent** (`to`) — Represents a single torrent download. Discovers which qBittorrent server to use via TCC (explicit reference or auto-discovery).
+2. **TorrentClientConfiguration** (`tcc`) — Holds connection details (URL + credentials) for a qBittorrent instance. Created automatically by TorrentServer, or manually for external servers. The related controller validates connectivity towards the qBittorrent server reporting Available/Degraded state.
+3. **Torrent** (`to`) — Represents a single torrent download. Discovers which qBittorrent server to use via TCC (explicit reference or auto-discovery). The related controller manages torrent lifecycle via qBittorrent APIs.
 
 ### Architecture
 
-```
-TorrentServer (ts)                 TorrentClientConfiguration (tcc)
-  │ creates & owns:                  │ validates connectivity
-  ├── Deployment                     │ reports Available/Degraded
-  ├── Service                        │
-  ├── PVC (config)                   │
-  ├── Secret (credentials)           │
-  └── TorrentClientConfiguration ────┘
-                                     │
-                               Torrent (to)
-                                 │ discovers TCC (by ref or auto-discovery)
-                                 │ uses TCC to get qBittorrent URL + credentials
-                                 └── manages torrent lifecycle via qBittorrent API
-```
+![Custom Resources](custom-resources.png)
 
 **Key design**: TorrentServer auto-creates a TCC. Torrent always resolves through TCC, making TCC the universal abstraction for "how to connect to a qBittorrent server." This supports both managed servers (TorrentServer) and external servers (manual TCC).
 
 ### Credential Pre-Seeding (Init Container)
+
+(You can skip this section as the process is completely handled by the TorrentServer controller. Keeping here just for implementation documentation.)
 
 qBittorrent v4.6.1+ no longer accepts externally-set default credentials. On first boot, it generates a random password and logs it to the console, which means operator-managed credentials would not match what qBittorrent actually uses.
 
