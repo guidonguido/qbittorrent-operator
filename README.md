@@ -1,118 +1,232 @@
 # qBittorrent Operator
 
-A Kubernetes operator that manages qBittorrent Torrent instances through Custom Resource Definitions (CRDs). This operator allows you to declaratively manage Torrents in qBittorrent using native Kubernetes resources, so you are not forced to interact with the UI.
+A Kubernetes operator that manages qBittorrent server deployments and torrent downloads through Custom Resource Definitions (CRDs). Deploy a fully managed qBittorrent instance and declaratively manage torrents — no manual UI interaction required.
 
-Check the [Complete Setup Guide](#complete-setup-guide) to build a full-functioning environment.
+Check the [Usage Examples](#usage-examples) for a full working environment.
 
 ## Table of Contents
 
 - [How It Works](#how-it-works)
-- [Custom Resource Definition](#custom-resource-definition)
+- [Custom Resource Definitions](#custom-resource-definitions)
+- [Compatibility](#compatibility)
 - [qBittorrent API Reference](#qbittorrent-api-reference)
 - [Installation](#installation)
 - [Usage Examples](#usage-examples)
-- [Complete Setup Guide](#complete-setup-guide)
-- [Configuration](#configuration)
 - [Monitoring](#monitoring)
 - [Troubleshooting](#troubleshooting)
 
 ## How It Works
 
-The qBittorrent Operator introduces a new Custom Resource Definition (CRD) called `Torrent` that represents a torrent in your qBittorrent instance. The operator watches for changes to these `Torrent` resources and automatically:
+The qBittorrent Operator introduces three Custom Resource Definitions that work together:
 
-1. **Creates torrents** in qBittorrent when new `Torrent` resources are created
-2. **Syncs status** from qBittorrent back to the Kubernetes resource
-3. **Removes torrents** from qBittorrent when `Torrent` resources are deleted
-4. **Maintains consistency** between Kubernetes state and qBittorrent state
+1. **TorrentServer** (`ts`) — Deploys and manages a qBittorrent server instance (Deployment, Service, PVC, credentials Secret), and automatically creates a TorrentClientConfiguration for it.
+2. **TorrentClientConfiguration** (`tcc`) — Holds connection details (URL + credentials) for a qBittorrent instance. Created automatically by TorrentServer, or manually for external servers. The related controller validates connectivity towards the qBittorrent server reporting Available/Degraded state.
+3. **Torrent** (`to`) — Represents a single torrent download. Discovers which qBittorrent server to use via TCC (explicit reference or auto-discovery). The related controller manages torrent lifecycle via qBittorrent APIs.
 
 ### Architecture
 
+![Custom Resources](custom-resources.png)
+
+**Key design**: TorrentServer auto-creates a TCC. Torrent always resolves through TCC, making TCC the universal abstraction for "how to connect to a qBittorrent server." This supports both managed servers (TorrentServer) and external servers (manual TCC).
+
+### Credential Pre-Seeding (Init Container)
+
+(You can skip this section as the process is completely handled by the TorrentServer controller. Keeping here just for implementation documentation.)
+
+qBittorrent v4.6.1+ no longer accepts externally-set default credentials. On first boot, it generates a random password and logs it to the console, which means operator-managed credentials would not match what qBittorrent actually uses.
+
+To solve this, TorrentServer Deployments include an **init container** that pre-seeds the qBittorrent config file with the operator-managed credentials before qBittorrent starts:
+
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   kubectl       │    │  qBittorrent     │    │   qBittorrent   │
-│   apply         │───▶│  Operator        │───▶│   Instance      │
-│   torrent.yaml  │    │  (Controller)    │    │   (Web API)     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │                          │
-                              │                          │
-                              ▼                          ▼
-                       ┌──────────────────┐    ┌─────────────────┐
-                       │  Kubernetes API  │    │   Torrent       │
-                       │  (Torrent CRD)   │    │   Downloads     │
-                       └──────────────────┘    └─────────────────┘
+Pod startup:
+  1. Init container (config-init):
+     - Checks if /config/qBittorrent/qBittorrent.conf already exists
+     - If not: reads credentials from the Secret, hashes the password
+       using PBKDF2-HMAC-SHA512 (qBittorrent's native format), and
+       writes a minimal config file
+     - If config exists: exits immediately (no-op)
+  2. Main container: qBittorrent starts with pre-seeded credentials
 ```
+
+The init container reuses the operator binary (`/manager config-init`), so no additional image is needed. It runs as root (required for PVC write access) but with hardened security: no privilege escalation, all capabilities dropped, read-only root filesystem. It only runs on first boot — subsequent pod restarts skip it because the config already exists.
 
 ### Controller Logic
 
-The operator follows the standard Kubernetes controller pattern:
+Each controller follows the standard Kubernetes reconciliation pattern:
 
-1. **Watch**: Monitors `Torrent` resources for changes
-2. **Reconcile**: Compares desired state (Kubernetes) with actual state (qBittorrent)
-3. **Act**: Makes API calls to qBittorrent to align states
-4. **Update**: Reports current status back to Kubernetes
+| Controller | Watches | Creates/Manages |
+|---|---|---|
+| **TorrentServer** | TorrentServer | Deployment, Service, PVC, Secret, TCC |
+| **TorrentClientConfiguration** | TCC, Secrets | Status conditions (Available/Degraded) |
+| **Torrent** | Torrent, TCC | Torrent lifecycle in qBittorrent via API |
 
-## Custom Resource Definition
+## Custom Resource Definitions
 
-### Torrent Resource
+### TorrentServer (shortName: `ts`)
 
-The `Torrent` CRD defines the schema for managing torrents:
+Manages a qBittorrent server deployment and all its supporting resources.
+
+```yaml
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: TorrentServer
+metadata:
+  name: qbittorrent
+  namespace: media-server
+spec:
+  image: lscr.io/linuxserver/qbittorrent:amd64-5.1.4
+  resources:
+    limits:
+      memory: 250Mi
+    requests:
+      memory: 200Mi
+  env:
+    - name: PUID
+      value: "0"
+    - name: PGID
+      value: "0"
+    - name: UMASK
+      value: "022"
+  configStorage:
+    size: "1Gi"
+  downloadVolumes:
+    - claimName: media-pvc
+      mountPath: /downloads/media
+  # Optional: reference an existing credentials Secret.
+  # If omitted, a Secret with auto-generated credentials is created.
+  # credentialsSecret:
+  #   name: qbittorrent-credentials
+```
+
+#### TorrentServer Spec Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `image` | string | No | `lscr.io/linuxserver/qbittorrent:amd64-5.1.4` | qBittorrent container image |
+| `replicas` | int32 | No | `1` | Number of replicas (0 or 1) |
+| `resources` | ResourceRequirements | No | — | CPU/memory requests and limits |
+| `env` | []EnvVar | No | — | Extra environment variables (PUID, PGID, etc.) |
+| `configStorage` | StorageSpec | No | 1Gi / ReadWriteOnce | PVC spec for the `/config` volume |
+| `downloadVolumes` | []DownloadVolumeSpec | No | — | Existing PVCs to mount as download directories |
+| `credentialsSecret` | SecretReference | No | Auto-generated | Secret with `username` and `password` keys |
+| `serviceType` | string | No | `ClusterIP` | Kubernetes Service type (ClusterIP, NodePort, LoadBalancer) |
+| `webUIPort` | int32 | No | `8080` | qBittorrent WebUI port |
+
+#### TorrentServer Status Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `deploymentName` | string | Name of the managed Deployment |
+| `serviceName` | string | Name of the managed Service |
+| `configPVCName` | string | Name of the managed config PVC |
+| `credentialsSecretName` | string | Name of the credentials Secret in use |
+| `clientConfigurationName` | string | Name of the auto-created TCC |
+| `readyReplicas` | int32 | Number of ready replicas |
+| `url` | string | Internal service URL for the WebUI |
+| `conditions` | []Condition | Available / Degraded conditions |
+
+#### Owned Resources
+
+TorrentServer creates and owns (via owner references) the following resources — they are garbage-collected when the TorrentServer is deleted:
+
+- **Deployment** — runs the qBittorrent container
+- **Service** — exposes the WebUI
+- **PVC** — config storage (`/config`)
+- **Secret** — WebUI credentials (only if auto-generated)
+- **TorrentClientConfiguration** — connection config for Torrent resources
+
+**Download PVCs are NOT owned**. They reference pre-existing PVCs and are not deleted when the TorrentServer is removed.
+
+---
+
+### TorrentClientConfiguration (shortName: `tcc`)
+
+Defines how to connect to a qBittorrent instance. The controller validates connectivity and reports status.
+
+```yaml
+# Example: Manual TCC for an external qBittorrent server
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: TorrentClientConfiguration
+metadata:
+  name: external-qbittorrent
+  namespace: media-server
+spec:
+  url: "http://qbittorrent.media-server.svc.cluster.local:8080"
+  credentialsSecret:
+    name: qbittorrent-credentials
+  timeout: "10s"
+  checkInterval: "60s"
+```
+
+#### TCC Spec Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `url` | string | Yes | — | qBittorrent WebUI URL (must start with `http://` or `https://`) |
+| `credentialsSecret` | SecretReference | Yes | — | Secret containing `username` and `password` keys |
+| `timeout` | string | No | `10s` | HTTP client timeout |
+| `checkInterval` | string | No | `60s` | Health check interval |
+
+#### TCC Status Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `connected` | bool | Whether the operator can reach qBittorrent |
+| `lastChecked` | Time | Timestamp of the last connectivity check |
+| `qbittorrentVersion` | string | Version reported by the qBittorrent instance |
+| `conditions` | []Condition | Available / Degraded conditions |
+
+---
+
+### Torrent (shortName: `to`)
+
+Represents a single torrent download managed via the qBittorrent API.
 
 ```yaml
 apiVersion: torrent.qbittorrent.io/v1alpha1
 kind: Torrent
 metadata:
-  name: my-torrent
+  name: big-buck-bunny
   namespace: media-server
 spec:
-  magnet_uri: "magnet:?xt=urn:btih:example-hash"
-status:
-  # Read-only fields populated by the operator
-  content_path: "/downloads/media/Example Torrent"
-  added_on: "1640995200"
-  state: "downloading"
-  total_size: 1073741824
-  name: "Example Torrent"
-  time_active: 3600
-  amount_left: 536870912
-  hash: "8c212779b4abde7c6bc608063a0d008b7e40ce32"
-  conditions:
-  - type: Available
-    status: "True"
-    reason: TorrentActive
-    message: "Torrent is active in qBittorrent"
-    lastTransitionTime: "2024-01-15T10:30:00Z"
+  magnet_uri: "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny"
+  # Uses auto-discovery: finds the single TCC in the namespace.
+  # To explicitly reference a TCC, uncomment:
+  # clientConfigRef:
+  #   name: qbittorrent-client-config
+  deleteFilesOnRemoval: true
 ```
 
-### Field Descriptions
+#### Torrent Spec Fields
 
-#### Spec Fields (User-defined)
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `magnet_uri` | string | Yes | — | Magnet URI for the torrent |
+| `clientConfigRef` | LocalObjectReference | No | Auto-discovery | Explicit reference to a TCC in the same namespace |
+| `deleteFilesOnRemoval` | bool | No | `true` | Delete downloaded files when the Torrent resource is deleted |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `magnet_uri` | string | Yes | The magnet URI for the torrent to download |
+**Client discovery**: If `clientConfigRef` is not set, the controller lists all TCCs in the namespace. If exactly one exists, it is used automatically. If zero or multiple exist, the Torrent enters a Degraded state.
 
-#### Status Fields (Operator-managed)
+#### Torrent Status Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `content_path` | string | Absolute path where torrent content is stored |
-| `added_on` | string | Unix timestamp when torrent was added |
+| `added_on` | int64 | Unix timestamp when torrent was added |
 | `state` | string | Current torrent state (see [Torrent States](#torrent-states)) |
-| `total_size` | integer | Total size in bytes of all files in the torrent |
+| `total_size` | int64 | Total size in bytes |
 | `name` | string | Display name of the torrent |
-| `time_active` | integer | Total active time in seconds |
-| `amount_left` | integer | Bytes remaining to download |
+| `time_active` | int64 | Total active time in seconds |
+| `amount_left` | int64 | Bytes remaining to download |
 | `hash` | string | Unique torrent hash identifier |
-| `conditions` | array | Standard Kubernetes conditions array |
+| `clientConfigurationName` | string | Resolved TCC name being used |
+| `conditions` | []Condition | Available / Degraded conditions |
 
 #### Torrent States
 
-The `state` field can have the following values:
-
 | State | Description |
 |-------|-------------|
-| `downloading` | Torrent is actively downloading |
-| `uploading` | Torrent is seeding (uploading to peers) |
+| `downloading` | Actively downloading |
+| `uploading` | Seeding (uploading to peers) |
 | `pausedDL` | Download is paused |
 | `pausedUP` | Upload/seeding is paused |
 | `queuedDL` | Queued for download |
@@ -124,19 +238,29 @@ The `state` field can have the following values:
 | `error` | Error occurred |
 | `missingFiles` | Torrent files are missing |
 
+## Compatibility
+
+### Tested qBittorrent Images
+
+| Image | qBittorrent Version | API Version | Status |
+|-------|---------------------|-------------|--------|
+| `lscr.io/linuxserver/qbittorrent:amd64-5.1.4` | 5.1.4 | v2.8.3 | Tested, Default |
+
+The operator is tested against the [LinuxServer.io qBittorrent image](https://docs.linuxserver.io/images/docker-qbittorrent/). Other images that expose the qBittorrent Web API v2 should work but are not officially tested.
+
+**Note**: qBittorrent v4.6.1+ changed credential handling — first boot generates a random password instead of using the default `adminadmin`. The operator handles this automatically via the [init container](#credential-pre-seeding-init-container).
+
 ## qBittorrent API Reference
 
-The operator uses the qBittorrent Web API v2. Key endpoints used:
+The operator uses the [qBittorrent Web API v2](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1)) (tested with v2..8.3). Key endpoints used:
 
 ### Authentication
-- `POST /api/v2/auth/login` - Authenticate and get session cookie
+- `POST /api/v2/auth/login` — Authenticate and get session cookie
 
 ### Torrent Management
-- `GET /api/v2/torrents/info` - Get list of all torrents
-- `POST /api/v2/torrents/add` - Add new torrent via magnet URI
-- `POST /api/v2/torrents/delete` - Remove torrent by hash
-
-For complete API documentation, see: [qBittorrent Web API](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1))
+- `GET /api/v2/torrents/info` — Get list of all torrents
+- `POST /api/v2/torrents/add` — Add new torrent via magnet URI
+- `POST /api/v2/torrents/delete` — Remove torrent by hash
 
 ## Installation
 
@@ -144,26 +268,25 @@ For complete API documentation, see: [qBittorrent Web API](https://github.com/qb
 
 - Kubernetes cluster (v1.20+)
 - kubectl configured
-- Docker (for building images)
-- Go 1.19+ (for development)
+
+If you want to build from source:
+- Docker (to build images)
+- Go 1.25+ (for development)
 
 ### Install the Operator
 
 #### Option 1: Using Kustomize (Recommended)
 
 ```bash
-# Clone the repository
 git clone https://github.com/guidonguido/qbittorrent-operator
 cd qbittorrent-operator
 
-# Deploy using kustomize
 kubectl apply -k config/default/
 ```
 
 #### Option 2: Using Make Targets
 
 ```bash
-# Clone the repository
 git clone https://github.com/guidonguido/qbittorrent-operator
 cd qbittorrent-operator
 
@@ -177,7 +300,6 @@ make deploy IMG=controller:latest
 #### Option 3: Using Install Manifest
 
 ```bash
-# Clone the repository
 git clone https://github.com/guidonguido/qbittorrent-operator
 cd qbittorrent-operator
 
@@ -190,110 +312,34 @@ kubectl apply -f dist/install.yaml
 
 **Verify installation**:
 ```bash
-kubectl get pods -n qbittorrent-operator
+kubectl get pods -n qbittorrent-operator-system
+kubectl get crd torrentservers.torrent.qbittorrent.io
+kubectl get crd torrentclientconfigurations.torrent.qbittorrent.io
 kubectl get crd torrents.torrent.qbittorrent.io
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/yourusername/qbittorrent-operator
+git clone https://github.com/guidonguido/qbittorrent-operator
 cd qbittorrent-operator
 
-# Build and deploy
 make docker-build IMG=qbittorrent-operator:latest
 make deploy IMG=qbittorrent-operator:latest
 ```
 
 ## Usage Examples
 
-### Basic Torrent Management
+### Managed Server (Recommended)
+
+Deploy a fully managed qBittorrent server and start downloading torrents:
 
 ```yaml
-# Create a torrent resource
-apiVersion: torrent.qbittorrent.io/v1alpha1
-kind: Torrent
-metadata:
-  name: ubuntu-iso
-  namespace: media-server
-spec:
-  magnet_uri: "magnet:?xt=urn:btih:ubuntu-22.04-desktop-amd64.iso"
-```
-
-```bash
-# Apply the torrent
-kubectl apply -f torrent.yaml
-
-# Check status
-kubectl get torrents -n media-server
-kubectl describe torrent ubuntu-iso -n media-server
-
-# Delete torrent (removes from qBittorrent)
-kubectl delete torrent ubuntu-iso -n media-server
-```
-
-### Multiple Torrents
-
-```yaml
-apiVersion: torrent.qbittorrent.io/v1alpha1
-kind: Torrent
-metadata:
-  name: linux-distros
-  namespace: media-server
-  labels:
-    category: "operating-systems"
-spec:
-  magnet_uri: "magnet:?xt=urn:btih:debian-12-amd64-netinst.iso"
----
-apiVersion: torrent.qbittorrent.io/v1alpha1
-kind: Torrent
-metadata:
-  name: fedora-iso
-  namespace: media-server
-  labels:
-    category: "operating-systems"
-spec:
-  magnet_uri: "magnet:?xt=urn:btih:fedora-39-x86_64-netinst.iso"
-```
-
-### Monitoring Torrent Progress
-
-```bash
-# Watch torrent status in real-time
-kubectl get torrents -n media-server -w
-
-# Get detailed status
-kubectl get torrent ubuntu-iso -n media-server -o yaml
-
-# Check operator logs
-kubectl logs -f deployment/qbittorrent-operator-controller-manager -n qbittorrent-operator-system
-```
-
-## Complete Setup Guide
-
-### Step 1: Deploy qBittorrent
-
-First, deploy qBittorrent with VPN protection:
-
-```yaml
-# qbittorrent-namespace.yaml
+# 1. Create namespace and download PVC
 apiVersion: v1
 kind: Namespace
 metadata:
   name: media-server
----
-# qbittorrent-pvc.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: qbittorrent
-  namespace: media-server
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -301,174 +347,165 @@ metadata:
   name: media-pvc
   namespace: media-server
 spec:
-  accessModes:
-    - ReadWriteOnce
+  # storageClassName: cinder or based on CSI     # Specify if needed
+  accessModes: [ReadWriteOnce]
   resources:
     requests:
       storage: 100Gi
 ---
-# qbittorrent-deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: qbittorrent
-  namespace: media-server
-  labels:
-    app: qbittorrent
-    part-of: qbittorrent
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: qbittorrent
-      part-of: qbittorrent
-  template:
-    metadata:
-      labels:
-        app: qbittorrent
-        part-of: qbittorrent
-    spec:
-      containers:
-      - name: qbittorrent
-        image: lscr.io/linuxserver/qbittorrent:5.1.1
-        ports:
-        - name: qbittorrent
-          containerPort: 8080
-        env:
-        - name: PUID
-          value: "0"
-        - name: PGID
-          value: "0"
-        - name: UMASK
-          value: "022"
-        volumeMounts:
-        - name: qbittorrent
-          mountPath: /config
-        - name: downloads-media
-          mountPath: /downloads/media
-        resources:
-          limits:
-            memory: 250Mi
-          requests:
-            memory: 200Mi
-      restartPolicy: Always
-      volumes:
-      - name: qbittorrent
-        persistentVolumeClaim:
-          claimName: qbittorrent
-      - name: downloads-media
-        persistentVolumeClaim:
-          claimName: media-pvc
----
-# qbittorrent-service.yaml
-apiVersion: v1
-kind: Service
+# 2. Deploy qBittorrent via TorrentServer
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: TorrentServer
 metadata:
   name: qbittorrent
   namespace: media-server
 spec:
-  selector:
-    app: qbittorrent
-    part-of: qbittorrent
-  type: ClusterIP
-  ports:
-    - port: 8080
-      targetPort: qbittorrent
-```
-
-### Step 2: Configure qBittorrent
-
-1. **Port forward to access Web UI**:
-```bash
-kubectl port-forward svc/qbittorrent 8080:8080 -n media-server
-```
-
-2. **Access Web UI**: Open http://localhost:8080
-   - Default username: `admin`
-   - Get password from logs: `kubectl logs deployment/qbittorrent -n media-server`
-
-3. **Configure qBittorrent**:
-   - Go to Tools → Options → Web UI
-   - Set username/password for API access
-   - Note the credentials for operator configuration
-
-### Step 3: Deploy the Operator
-
-1. **Create operator configuration**:
-```yaml
-# operator-config.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: qbittorrent-secret
-  namespace: qbittorrent-operator
-type: Opaque
-data:
-  username: <base64-encoded-qbittorrent-username>
-  password: <base64-encoded-qbittorrent-password>
+  image: lscr.io/linuxserver/qbittorrent:amd64-5.1.4
+  env:
+    - name: PUID
+      value: "0"
+    - name: PGID
+      value: "0"
+  configStorage:
+    size: "1Gi"
+  downloadVolumes:
+    - claimName: media-pvc
+      mountPath: /downloads/media
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: qbittorrent-config
-  namespace: qbittorrent-operator
-data:
-  url: "http://qbittorrent.media-server.svc.cluster.local:8080"
-```
-
-2. **Deploy the operator**:
-```bash
-# Apply configuration
-kubectl apply -f operator-config.yaml
-
-# Deploy operator
-make deploy IMG=qbittorrent-operator:latest
-```
-
-### Step 4: Test the Setup
-
-```yaml
-# test-torrent.yaml
+# 3. Add a torrent (auto-discovers the TCC created by TorrentServer)
 apiVersion: torrent.qbittorrent.io/v1alpha1
 kind: Torrent
 metadata:
-  name: test-torrent
+  name: big-buck-bunny
   namespace: media-server
 spec:
-  magnet_uri: "magnet:?xt=urn:btih:ubuntu-22.04-desktop-amd64.iso"
+  magnet_uri: "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny"
 ```
 
 ```bash
-# Apply test torrent
-kubectl apply -f test-torrent.yaml
+kubectl apply -f managed-setup.yaml
 
-# Monitor progress
-kubectl get torrent test-torrent -n media-server -w
+# Check server status
+kubectl get ts -n media-server
 
-# Check in qBittorrent Web UI
-# The torrent should appear automatically
+# Check connectivity
+kubectl get tcc -n media-server
+
+# Watch torrent progress
+kubectl get to -n media-server -w
+
+# Port-forward the qbittorrent svc if you want to access the WebUI
+# Credentials are found on the qbittorrent-credentials secret
 ```
 
-## Configuration
+### Access the WebUI (Optional)
 
-### Operator Configuration
+```bash
+kubectl port-forward svc/qbittorrent 8080:8080 -n media-server
+# Open http://localhost:8080
+# Credentials are in the auto-generated Secret:
+kubectl get secret qbittorrent-credentials -n media-server -o jsonpath='{.data.username}' | base64 -d
+kubectl get secret qbittorrent-credentials -n media-server -o jsonpath='{.data.password}' | base64 -d
+```
 
-The operator can be configured via environment variables:
+### External Server
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `QBITTORRENT_URL` | qBittorrent Web UI URL | Required |
-| `QBITTORRENT_USERNAME` | qBittorrent username | Required |
-| `QBITTORRENT_PASSWORD` | qBittorrent password | Required |
+Connect to a qBittorrent instance you manage yourself:
 
-### qBittorrent Configuration
+```yaml
+# 1. Create a Secret with credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: qbt-credentials
+  namespace: media-server
+type: Opaque
+data:
+  username: YWRtaW4=      # base64("admin")
+  password: cGFzc3dvcmQ=  # base64("password")
+---
+# 2. Create a TCC pointing to your server
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: TorrentClientConfiguration
+metadata:
+  name: my-qbittorrent
+  namespace: media-server
+spec:
+  url: "http://qbittorrent.media-server.svc.cluster.local:8080"
+  credentialsSecret:
+    name: qbt-credentials
+---
+# 3. Add torrents (auto-discovers the TCC)
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: Torrent
+metadata:
+  name: ubuntu-iso
+  namespace: media-server
+spec:
+  magnet_uri: "magnet:?xt=urn:btih:ubuntu-24.04-desktop-amd64.iso"
+```
 
-For optimal operation with the operator:
 
-1. **Enable Web UI**: Tools → Options → Web UI → Enable
-2. **Set Authentication**: Configure username/password
-3. **Allow Cross-Origin**: Set to allow API access
-4. **Download Path**: Configure default download location
+### Multiple Servers
+
+When multiple TCCs exist in a namespace, use explicit references:
+
+```yaml
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: Torrent
+metadata:
+  name: my-download
+  namespace: media-server
+spec:
+  magnet_uri: "magnet:?xt=urn:btih:example-hash"
+  clientConfigRef:
+    name: qbittorrent-client-config  # explicit TCC reference
+  deleteFilesOnRemoval: false        # keep files on Torrent deletion
+```
+
+### Monitoring Torrent Progress
+
+```bash
+# Watch torrent status in real-time
+kubectl get to -n media-server -w
+
+# Get detailed status
+kubectl get torrent big-buck-bunny -n media-server -o yaml
+
+# Check TorrentServer resources
+kubectl get ts -n media-server -o wide
+
+# Check TCC connectivity
+kubectl get tcc -n media-server
+
+# Check operator logs
+kubectl logs -f deployment/qbittorrent-operator-controller-manager -n qbittorrent-operator
+```
+
+
+### Step 5: Add Torrents
+
+```yaml
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: Torrent
+metadata:
+  name: big-buck-bunny
+  namespace: media-server
+spec:
+  magnet_uri: "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny"
+```
+
+```bash
+kubectl apply -f torrent.yaml
+
+# Monitor progress
+kubectl get to -n media-server -w
+# NAME             STATE         NAME             SIZE          PROGRESS
+# big-buck-bunny   downloading   Big Buck Bunny   276445467     138222733
+
+# Delete torrent (also removes from qBittorrent and deletes files by default)
+kubectl delete torrent big-buck-bunny -n media-server
+```
 
 ## Monitoring
 
@@ -476,203 +513,57 @@ For optimal operation with the operator:
 
 The operator exposes Prometheus metrics on `:8080/metrics`:
 
-- `controller_runtime_reconcile_total` - Total reconciliations
-- `controller_runtime_reconcile_errors_total` - Reconciliation errors
-- `controller_runtime_reconcile_time_seconds` - Reconciliation duration
+- `controller_runtime_reconcile_total` — Total reconciliations
+- `controller_runtime_reconcile_errors_total` — Reconciliation errors
+- `controller_runtime_reconcile_time_seconds` — Reconciliation duration
 
 ### ServiceMonitor Setup
 
-To enable Prometheus scraping of the operator metrics, follow these steps:
-
-#### 1. Enable Prometheus Resources
-
-Uncomment the Prometheus resources in `config/default/kustomization.yaml`:
+To enable Prometheus scraping, uncomment the Prometheus section in `config/default/kustomization.yaml`:
 
 ```yaml
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
 - ../prometheus
 ```
 
-#### 2. Configure ServiceMonitor
-
-Edit `config/prometheus/monitor.yaml` to match your Prometheus setup:
-
-```yaml
-# Prometheus Monitor Service (Metrics)
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  labels:
-    release: prometheus-stack  # Match your Prometheus operator release
-    control-plane: controller-manager
-    app.kubernetes.io/name: qbittorrent-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: controller-manager-metrics-monitor
-  namespace: system
-spec:
-  endpoints:
-    - path: /metrics
-      interval: 30s                # Scrape interval
-      scrapeTimeout: 30s           # Scrape timeout
-      port: http                   # Port name from metrics service
-      scheme: http                 # HTTP (not HTTPS)
-      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-      honorLabels: true            # Preserve metric labels
-  namespaceSelector:
-    matchNames:
-      - observability              # Target namespace for monitoring
-  selector:
-    matchLabels:
-      control-plane: controller-manager
-      app.kubernetes.io/name: qbittorrent-operator
-```
-
-#### 3. Common Configuration Options
-
-**For kube-prometheus-stack:**
-```yaml
-metadata:
-  labels:
-    release: prometheus-stack  # or your Helm release name
-```
-
-**For different Prometheus namespace:**
-```yaml
-namespaceSelector:
-  matchNames:
-    - your-prometheus-namespace  # e.g., monitoring, prometheus, observability
-```
-
-**For Prometheus without namespace selector:**
-```yaml
-# Remove namespaceSelector entirely for cluster-wide discovery
-namespaceSelector: {}
-```
-
-#### 4. Deploy with Monitoring
+Then configure `config/prometheus/monitor.yaml` to match your Prometheus setup and deploy:
 
 ```bash
-# Deploy the operator with ServiceMonitor
 kubectl apply -k config/default
 
-# Verify ServiceMonitor creation
+# Verify ServiceMonitor
 kubectl get servicemonitor -n qbittorrent-operator-system
-
-# Check if Prometheus discovers the target
-kubectl port-forward svc/prometheus-operated 9090:9090 -n observability
-# Then visit http://localhost:9090/targets
 ```
 
-#### 5. Verify Metrics Collection
+### Useful PromQL Queries
 
-Once deployed, verify that Prometheus is collecting metrics:
+```promql
+# Controller reconciliation rate
+rate(controller_runtime_reconcile_total[5m])
 
-1. **Check Targets**: In Prometheus UI → Status → Targets
-   - Look for `qbittorrent-operator-controller-manager-metrics-monitor`
-   - Status should be "UP"
+# Error rate
+rate(controller_runtime_reconcile_errors_total[5m])
 
-2. **Query Metrics**: Try these queries in Prometheus:
-   ```promql
-   # Controller reconciliation rate
-   rate(controller_runtime_reconcile_total[5m])
-   
-   # Error rate
-   rate(controller_runtime_reconcile_errors_total[5m])
-   
-   # Reconciliation duration
-   histogram_quantile(0.95, rate(controller_runtime_reconcile_time_seconds_bucket[5m]))
-   ```
+# Reconciliation duration (p95)
+histogram_quantile(0.95, rate(controller_runtime_reconcile_time_seconds_bucket[5m]))
+```
 
 ### Logging
-
-Operator logs include structured information:
 
 ```bash
 # View operator logs
 kubectl logs -f deployment/qbittorrent-operator-controller-manager -n qbittorrent-operator-system
 
 # Increase log verbosity
-kubectl patch deployment qbittorrent-operator-controller-manager -n qbittorrent-operator-system -p '{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":["--leader-elect","--health-probe-bind-address=:8081","--v=2"]}]}}}}'
+kubectl patch deployment qbittorrent-operator-controller-manager \
+  -n qbittorrent-operator-system \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":["--leader-elect","--health-probe-bind-address=:8081","--v=2"]}]}}}}'
 ```
 
 ### Health Checks
 
-The operator provides health endpoints:
-
-- `/healthz` - Liveness probe
-- `/readyz` - Readiness probe (includes qBittorrent connectivity)
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Operator Can't Connect to qBittorrent
-
-```bash
-# Check operator logs
-kubectl logs deployment/qbittorrent-operator-controller-manager -n qbittorrent-operator-system
-
-# Common causes:
-# - Wrong URL in configuration
-# - qBittorrent not running
-# - Network policies blocking access
-# - Incorrect credentials
-```
-
-#### 2. Torrents Not Appearing in qBittorrent
-
-```bash
-# Check torrent resource status
-kubectl describe torrent <torrent-name> -n <namespace>
-
-# Look for conditions:
-# - Available: True = Working correctly
-# - Degraded: True = Error occurred (check message)
-```
-
-#### 3. Torrents Not Syncing Status
-
-```bash
-# Check reconciliation frequency
-kubectl get torrent <torrent-name> -n <namespace> -o yaml
-
-# Status should update every 30 seconds
-# If not updating, check operator logs for errors
-```
-
-### Debug Commands
-
-```bash
-# List all torrents across namespaces
-kubectl get torrents --all-namespaces
-
-# Get detailed torrent information
-kubectl get torrent <name> -n <namespace> -o yaml
-
-# Check operator events
-kubectl get events -n qbittorrent-operator-system
-
-# Port forward to qBittorrent for direct access
-kubectl port-forward svc/qbittorrent 8080:8080 -n media-server
-```
-
-### Log Analysis
-
-Look for these log patterns:
-
-```
-# Successful reconciliation
-"Successfully logged into qBittorrent"
-"Torrent reconciliation completed"
-
-# Connection issues
-"Failed to login to qBittorrent"
-"Failed to get torrents info list"
-
-# API errors
-"Unauthorized access to qbittorrent"
-"Failed to add torrent to qBittorrent"
-```
+- `/healthz` — Liveness probe
+- `/readyz` — Readiness probe
 
 ## Contributing
 
@@ -686,3 +577,8 @@ Look for these log patterns:
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
+## Contributors
+
+| Name | Email | LinkedIn | Website |
+|------|-------|----------|---------|
+| Guido | guidonguido@gmail.com | [linkedin.com/in/guidongui](https://www.linkedin.com/in/guido-ricioppo/) | [exposing.guidongui.com](https://exposing.guidongui.com) |

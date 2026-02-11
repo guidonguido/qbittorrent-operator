@@ -66,6 +66,9 @@ spec:
           - --metrics-bind-address=:8080
         image: controller:latest
         name: manager
+        env:
+          - name: OPERATOR_IMAGE
+            value: controller:latest
         ports:
         - containerPort: 8080
           name: metrics
@@ -73,23 +76,6 @@ spec:
         - containerPort: 8081
           name: health
           protocol: TCP
-        env:
-        # qBittorrent connection configuration
-        - name: QBITTORRENT_URL
-          valueFrom:
-            configMapKeyRef:
-              name: qbittorrent-config
-              key: url
-        - name: QBITTORRENT_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: qbittorrent-secret
-              key: username
-        - name: QBITTORRENT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: qbittorrent-secret
-              key: password
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

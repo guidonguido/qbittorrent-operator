@@ -3,11 +3,8 @@ kind: Kustomization
 
 resources:
 - manager.yaml
-- qbittorrent-config.yaml
-- qbittorrent-secret.yaml
 
 images:
 - name: controller
   newName: ghcr.io/guidonguido/qbittorrent-operator
-  newTag: v0.1.6
-
+  newTag: v0.1.9

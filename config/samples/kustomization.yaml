@@ -1,4 +1,6 @@
 ## Append samples of your project ##
 resources:
 - torrent_v1alpha1_torrent.yaml
+- torrent_v1alpha1_torrentserver.yaml
+- torrent_v1alpha1_torrentclientconfiguration.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

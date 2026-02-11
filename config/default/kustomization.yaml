@@ -4,7 +4,7 @@ kind: Kustomization
 images:
 - name: controller
   newName: ghcr.io/guidonguido/qbittorrent-operator
-  newTag: v0.1.6
+  newTag: v0.1.9
 
 # Environment-specific configuration
 
@@ -35,18 +35,27 @@ resources:
 - ../rbac
 - ../manager
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
-# - ../prometheus
+- ../prometheus
 - metrics_service.yaml
+
+# Sync OPERATOR_IMAGE env var with the manager container image
+replacements:
+  - source:
+      kind: Deployment
+      name: controller-manager
+      fieldPath: spec.template.spec.containers.[name=manager].image
+    targets:
+      - select:
+          kind: Deployment
+          name: controller-manager
+        fieldPaths:
+          - spec.template.spec.containers.[name=manager].env.[name=OPERATOR_IMAGE].value
 
 # Production-specific patches
 patches:
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
-- path: qbittorrent-config-patch.yaml
-  target:
-    kind: ConfigMap
-    name: qbittorrent-config
 
 # [NETWORK POLICY] Protect the /metrics endpoint and Webhook Server with NetworkPolicy.
 # Only Pod(s) running a namespace labeled with 'metrics: enabled' will be able to gather the metrics.

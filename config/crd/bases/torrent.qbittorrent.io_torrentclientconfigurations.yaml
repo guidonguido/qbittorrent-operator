@@ -4,35 +4,33 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: torrents.torrent.qbittorrent.io
+  name: torrentclientconfigurations.torrent.qbittorrent.io
 spec:
   group: torrent.qbittorrent.io
   names:
-    kind: Torrent
-    listKind: TorrentList
-    plural: torrents
+    kind: TorrentClientConfiguration
+    listKind: TorrentClientConfigurationList
+    plural: torrentclientconfigurations
     shortNames:
-    - to
-    singular: torrent
+    - tcc
+    singular: torrentclientconfiguration
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.state
-      name: State
+    - jsonPath: .spec.url
+      name: URL
       type: string
-    - jsonPath: .status.name
-      name: Name
-      type: string
-    - jsonPath: .status.total_size
-      name: Size
-      type: string
-    - jsonPath: .status.amount_left
-      name: Progress
-      type: string
+    - jsonPath: .status.connected
+      name: Connected
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Torrent is the Schema for the torrents API.
+        description: TorrentClientConfiguration is the Schema for the torrentclientconfigurations
+          API.
         properties:
           apiVersion:
             description: |-
@@ -52,48 +50,38 @@ spec:
           metadata:
             type: object
           spec:
-            description: TorrentSpec defines the desired state of Torrent.
+            description: TorrentClientConfigurationSpec defines the desired state
+              of TorrentClientConfiguration.
             properties:
-              clientConfigRef:
-                description: |-
-                  ClientConfigRef is an explicit reference to a TorrentClientConfiguration in the same namespace.
-                  If not set, the controller will auto-discover a TCC in the namespace
-                  (exactly one must exist for auto-discovery to succeed).
+              checkInterval:
+                default: 60s
+                description: CheckInterval is how often the controller checks connectivity
+                  (e.g., "60s").
+                type: string
+              credentialsSecret:
+                description: CredentialsSecret references a Secret containing 'username'
+                  and 'password' keys.
                 properties:
                   name:
-                    description: Name of the referenced object.
+                    description: Name of the Secret.
                     type: string
                 required:
                 - name
                 type: object
-              deleteFilesOnRemoval:
-                default: true
-                description: |-
-                  DeleteFilesOnRemoval controls whether downloaded files are deleted
-                  when the Torrent resource is deleted.
-                type: boolean
-              magnet_uri:
-                description: MagnetURI is the magnet link for the torrent to download.
+              url:
+                description: URL is the base URL of the qBittorrent WebUI (e.g., "http://qbittorrent:8080").
+                pattern: ^https?://
                 type: string
             required:
-            - magnet_uri
+            - credentialsSecret
+            - url
             type: object
           status:
-            description: TorrentStatus defines the observed state of Torrent.
+            description: TorrentClientConfigurationStatus defines the observed state
+              of TorrentClientConfiguration.
             properties:
-              added_on:
-                format: int64
-                type: integer
-              amount_left:
-                format: int64
-                type: integer
-              clientConfigurationName:
-                description: ClientConfigurationName is the resolved TCC name being
-                  used.
-                type: string
               conditions:
-                description: Conditions represent the latest available observations
-                  of a torrent's current state.
+                description: Conditions represent the latest available observations.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -149,20 +137,19 @@ spec:
                   - type
                   type: object
                 type: array
-              content_path:
+              connected:
+                description: Connected indicates whether the operator can currently
+                  reach qBittorrent.
+                type: boolean
+              lastChecked:
+                description: LastChecked is the timestamp of the last connectivity
+                  check.
+                format: date-time
                 type: string
-              hash:
+              qbittorrentVersion:
+                description: QBittorrentVersion is the version reported by the qBittorrent
+                  instance.
                 type: string
-              name:
-                type: string
-              state:
-                type: string
-              time_active:
-                format: int64
-                type: integer
-              total_size:
-                format: int64
-                type: integer
             type: object
         type: object
     served: true

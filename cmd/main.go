@@ -1,31 +1,13 @@
-/*
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
-	"net/http"
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	torrentv1alpha1 "github.com/guidonguido/qbittorrent-operator/api/v1alpha1"
+	"github.com/guidonguido/qbittorrent-operator/internal/configinit"
 	"github.com/guidonguido/qbittorrent-operator/internal/controller"
 	"github.com/guidonguido/qbittorrent-operator/internal/qbittorrent"
 	// +kubebuilder:scaffold:imports
@@ -51,18 +34,25 @@ var (
 )
 
 func init() {
-	// Add the scheme for the client-go libraries
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
-	// Add the scheme for the custom resources
-	// Must is used to ensure that the scheme is added to the scheme
-	// and panic if the scheme registration fails
 	utilruntime.Must(torrentv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
 // nolint:gocyclo
 func main() {
+	// The same qbittorrent operator binary is used for both the main
+	// operator process and the config-init init container.
+	// The config-init mode is executed only by the init container,
+	// needed to initialize credentials on qBittorrent server first boot.
+	if len(os.Args) > 1 && os.Args[1] == "config-init" {
+		if err := configinit.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "config-init failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
@@ -71,7 +61,6 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var qbittorrentURL, qbittorrentUsername, qbittorrentPassword string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -89,58 +78,20 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.StringVar(&qbittorrentURL, "qbittorrent-url", "", "The URL of the qBittorrent server.")
-	flag.StringVar(&qbittorrentUsername, "qbittorrent-username", "",
-		"The username for logging into the qBittorrent server.")
-	flag.StringVar(&qbittorrentPassword, "qbittorrent-password", "",
-		"The password for logging into the qBittorrent server.")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	// Allow environment variable overrides
-	if url := os.Getenv("QBITTORRENT_URL"); url != "" {
-		qbittorrentURL = url
-	}
-	if username := os.Getenv("QBITTORRENT_USERNAME"); username != "" {
-		qbittorrentUsername = username
-	}
-	if password := os.Getenv("QBITTORRENT_PASSWORD"); password != "" {
-		qbittorrentPassword = password
-	}
-
-	// Validate the required flags
-	if qbittorrentURL == "" {
-		setupLog.Error(nil, "qbittorrent-url is required")
-		os.Exit(1)
-	}
-	if qbittorrentUsername == "" {
-		setupLog.Error(nil, "qbittorrent-username is required")
-		os.Exit(1)
-	}
-	if qbittorrentPassword == "" {
-		setupLog.Error(nil, "qbittorrent-password is required")
-		os.Exit(1)
-	}
-
-	// Set the logger for the controller runtime
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
-	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("disabling http/2")
-		c.NextProtos = []string{"http/1.1"}
-	}
-
 	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
+		tlsOpts = append(tlsOpts,
+			func(c *tls.Config) {
+				setupLog.Info("disabling http/2")
+				c.NextProtos = []string{"http/1.1"}
+			})
 	}
 
 	// Create watchers for metrics and webhooks certificates
@@ -173,9 +124,6 @@ func main() {
 	})
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
 		SecureServing: secureMetrics,
@@ -183,21 +131,9 @@ func main() {
 	}
 
 	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -217,7 +153,6 @@ func main() {
 		})
 	}
 
-	// Create the controller runtime manager
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -225,39 +160,41 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "e3228fca.qbittorrent.io",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
-	// Initialize qBittorrent client without logger
-	qbClient := qbittorrent.NewClient(qbittorrentURL)
+	// The qBittorrent is shared between TCC and Torrent controllers
+	// So already existing connections will be reused, based on server and credentials
+	clientPool := qbittorrent.NewClientPool(1 * time.Minute)
 
-	// Create a context for the login call
-	ctx := context.Background()
-	if err := qbClient.Login(ctx, qbittorrentUsername, qbittorrentPassword); err != nil {
-		setupLog.Error(err, "unable to login to qBittorrent")
+	// Build TS controller and register to the manager
+	if err := (&controller.TorrentServerReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		OperatorImage: os.Getenv("OPERATOR_IMAGE"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "TorrentServer")
 		os.Exit(1)
 	}
-	setupLog.Info("Successfully logged into qBittorrent")
 
-	// Create controller without logger parameter
+	// Build TCC controller and register to the manager
+	if err := (&controller.TorrentClientConfigurationReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		ClientPool: clientPool,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "TorrentClientConfiguration")
+		os.Exit(1)
+	}
+
+	// Build Torrent controller and register to the manager
 	if err := (&controller.TorrentReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		QBTClient: qbClient,
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		ClientPool: clientPool,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Torrent")
 		os.Exit(1)
@@ -286,16 +223,6 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
-	}
-
-	// Add qBittorrent connectivity check
-	if err := mgr.AddReadyzCheck("qbittorrent", func(req *http.Request) error {
-		ctx := context.Background()
-		_, err := qbClient.GetTorrentsInfo(ctx)
-		return err
-	}); err != nil {
-		setupLog.Error(err, "unable to set up qBittorrent ready check")
 		os.Exit(1)
 	}
 

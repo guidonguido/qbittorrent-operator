@@ -18,13 +18,11 @@ func GetTorrentHash(magnetURI string) (string, error) {
 		return "", fmt.Errorf("no hash after 'btih:'")
 	}
 
-	// Find the end of the hash (next & or end of string)
+	// Hash ends at the next '&' or end of string
 	hashEnd := strings.Index(magnetURI[hashStart:], "&")
 	if hashEnd == -1 {
-		// No & found, hash goes to end of string
 		return magnetURI[hashStart:], nil
 	}
 
-	// Extract hash between btih: and next &
 	return magnetURI[hashStart : hashStart+hashEnd], nil
 }

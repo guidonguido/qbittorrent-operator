@@ -1,0 +1,34 @@
+apiVersion: torrent.qbittorrent.io/v1alpha1
+kind: TorrentServer
+metadata:
+  labels:
+    app.kubernetes.io/name: qbittorrent-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: qbittorrent
+  namespace: qbittorrent-operator
+spec:
+  image: lscr.io/linuxserver/qbittorrent:amd64-5.1.4
+  resources:
+    limits:
+      memory: 250Mi
+    requests:
+      memory: 200Mi
+  env:
+    - name: PUID
+      value: "0"
+    - name: PGID
+      value: "0"
+    - name: UMASK
+      value: "022"
+  configStorage:
+    size: "1Gi"
+  downloadVolumes:
+    - claimName: media-pvc
+      mountPath: /downloads/media
+  # If not provided, the operator will create a 
+  # Secret with new credentials and store it in the 
+  # same namespace as the TorrentServer. 
+  # If provided, the operator will use the existing Secret 
+  # and will not manage its lifecycle.
+  # credentialsSecret:
+  #   name: qbittorrent-credentials
