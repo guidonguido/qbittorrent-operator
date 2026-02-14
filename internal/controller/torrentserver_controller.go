@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -31,6 +32,7 @@ const (
 type TorrentServerReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
+	Recorder      record.EventRecorder
 	OperatorImage string // operator image for init containers, set from OPERATOR_IMAGE env var
 }
 
@@ -42,6 +44,7 @@ type TorrentServerReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *TorrentServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -61,6 +64,8 @@ func (r *TorrentServerReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, ts); err != nil {
 			return ctrl.Result{}, err
 		}
+		r.Recorder.Eventf(ts, corev1.EventTypeNormal, "Deleting",
+			"TorrentServer %s is being deleted", ts.Name)
 		return ctrl.Result{}, nil
 	}
 
@@ -127,7 +132,10 @@ func (r *TorrentServerReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	ts.Status.ClientConfigurationName = tccName
 	ts.Status.URL = serviceURL
 
-	r.setAvailableCondition(ts, "Reconciled", "All resources are reconciled")
+	if !meta.IsStatusConditionTrue(ts.Status.Conditions, TypeAvailableTorrentServer) {
+		r.setAvailableCondition(ts, "Reconciled", "All resources are reconciled")
+		r.Recorder.Event(ts, corev1.EventTypeNormal, "Reconciled", "All resources are reconciled")
+	}
 	if err := r.Status().Update(ctx, ts); err != nil {
 		logger.Error(err, "Failed to update TorrentServer status")
 		return ctrl.Result{}, err
@@ -143,12 +151,18 @@ func (r *TorrentServerReconciler) ensureCredentialsSecret(ctx context.Context, t
 	// Check if user specified ts.spec.credentialsSecret.name reference
 	if ts.Spec.CredentialsSecret != nil {
 		if err := r.Get(ctx, types.NamespacedName{Name: ts.Spec.CredentialsSecret.Name, Namespace: ts.Namespace}, secret); err != nil {
+			r.Recorder.Eventf(ts, corev1.EventTypeWarning, "CredentialsSecretError",
+				"Credentials secret %q not found: %v", ts.Spec.CredentialsSecret.Name, err)
 			return "", fmt.Errorf("credentials secret %q not found: %w", ts.Spec.CredentialsSecret.Name, err)
 		}
 		if _, ok := secret.Data["username"]; !ok {
+			r.Recorder.Eventf(ts, corev1.EventTypeWarning, "CredentialsSecretError",
+				"Credentials secret %q missing 'username' key", ts.Spec.CredentialsSecret.Name)
 			return "", fmt.Errorf("credentials secret %q missing 'username' key", ts.Spec.CredentialsSecret.Name)
 		}
 		if _, ok := secret.Data["password"]; !ok {
+			r.Recorder.Eventf(ts, corev1.EventTypeWarning, "CredentialsSecretError",
+				"Credentials secret %q missing 'password' key", ts.Spec.CredentialsSecret.Name)
 			return "", fmt.Errorf("credentials secret %q missing 'password' key", ts.Spec.CredentialsSecret.Name)
 		}
 		return ts.Spec.CredentialsSecret.Name, nil
@@ -190,11 +204,19 @@ func (r *TorrentServerReconciler) ensureCredentialsSecret(ctx context.Context, t
 		}
 		logger.V(1).Info("Generated credentials secret", "name", secretName)
 
+		if secret.CreationTimestamp.IsZero() {
+			r.Recorder.Eventf(ts, corev1.EventTypeNormal, "CredentialsSecretCreated",
+				"Credentials secret %q created", secretName)
+		}
+
 		return nil
 	})
 	if err != nil {
+		r.Recorder.Eventf(ts, corev1.EventTypeWarning, "CredentialsSecretError",
+			"Failed to create credentials secret %q: %v", secretName, err)
 		return "", fmt.Errorf("failed to create credentials secret: %w", err)
 	}
+
 	logger.V(1).Info("Credentials secret ensured with creation", "name", secretName, "result", result)
 
 	return secretName, nil
@@ -242,10 +264,14 @@ func (r *TorrentServerReconciler) ensureConfigPVC(ctx context.Context, ts *torre
 					},
 				},
 			}
+			r.Recorder.Eventf(ts, corev1.EventTypeNormal, "ConfigPVCCreated",
+				"Config PVC %q created with storage size %s", pvcName, storageSize)
 		}
 		return nil
 	})
 	if err != nil {
+		r.Recorder.Eventf(ts, corev1.EventTypeWarning, "ConfigPVCError",
+			"Failed to create or update config PVC %q: %v", pvcName, err)
 		return "", fmt.Errorf("failed to ensure config PVC: %w", err)
 	}
 	logger.V(1).Info("Config PVC ensured", "name", pvcName, "result", result)
@@ -393,9 +419,16 @@ func (r *TorrentServerReconciler) ensureDeployment(ctx context.Context, ts *torr
 				},
 			},
 		}
+
+		if deployment.CreationTimestamp.IsZero() {
+			r.Recorder.Eventf(ts, corev1.EventTypeNormal, "DeploymentCreated",
+				"Deployment %q created", deploymentName)
+		}
 		return nil
 	})
 	if err != nil {
+		r.Recorder.Eventf(ts, corev1.EventTypeWarning, "DeploymentError",
+			"Failed to create or update deployment %q: %v", deploymentName, err)
 		return "", fmt.Errorf("failed to ensure deployment: %w", err)
 	}
 	logger.V(1).Info("Deployment ensured", "name", deploymentName, "result", result)
@@ -441,9 +474,17 @@ func (r *TorrentServerReconciler) ensureService(ctx context.Context, ts *torrent
 				},
 			},
 		}
+
+		if svc.CreationTimestamp.IsZero() {
+			r.Recorder.Eventf(ts, corev1.EventTypeNormal, "ServiceCreated",
+				"Service %q created with type %s", serviceName, serviceType)
+		}
+
 		return nil
 	})
 	if err != nil {
+		r.Recorder.Eventf(ts, corev1.EventTypeWarning, "ServiceError",
+			"Failed to create or update service %q: %v", serviceName, err)
 		return "", fmt.Errorf("failed to ensure service: %w", err)
 	}
 	logger.V(1).Info("Service ensured", "name", serviceName, "result", result)
@@ -474,9 +515,17 @@ func (r *TorrentServerReconciler) ensureTorrentClientConfiguration(ctx context.C
 				Name: secretName,
 			},
 		}
+
+		if tcc.CreationTimestamp.IsZero() {
+			r.Recorder.Eventf(ts, corev1.EventTypeNormal, "ClientConfigCreated",
+				"TorrentClientConfiguration %q created", tccName)
+		}
+
 		return nil
 	})
 	if err != nil {
+		r.Recorder.Eventf(ts, corev1.EventTypeWarning, "ClientConfigError",
+			"Failed to create or update TorrentClientConfiguration %q: %v", tccName, err)
 		return "", fmt.Errorf("failed to ensure TorrentClientConfiguration: %w", err)
 	}
 	logger.V(1).Info("TorrentClientConfiguration ensured", "name", tccName, "result", result)

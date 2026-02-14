@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	torrentv1alpha1 "github.com/guidonguido/qbittorrent-operator/api/v1alpha1"
@@ -63,8 +64,9 @@ var _ = Describe("TorrentServer Controller", func() {
 
 		It("should create owned resources after reconciliation", func() {
 			controllerReconciler := &TorrentServerReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: record.NewFakeRecorder(10),
 			}
 
 			// Reconcile multiple times: 1st adds finalizer, 2nd+ creates resources
@@ -124,6 +126,7 @@ var _ = Describe("TorrentServer Controller", func() {
 			controllerReconciler := &TorrentServerReconciler{
 				Client:        k8sClient,
 				Scheme:        k8sClient.Scheme(),
+				Recorder:      record.NewFakeRecorder(10),
 				OperatorImage: "ghcr.io/guidonguido/qbittorrent-operator:test",
 			}
 
