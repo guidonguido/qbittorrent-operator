@@ -174,6 +174,7 @@ func main() {
 	if err := (&controller.TorrentServerReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorderFor("TorrentServer"),
 		OperatorImage: os.Getenv("OPERATOR_IMAGE"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TorrentServer")
@@ -184,6 +185,7 @@ func main() {
 	if err := (&controller.TorrentClientConfigurationReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorderFor("TorrentClientConfiguration"),
 		ClientPool: clientPool,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TorrentClientConfiguration")
@@ -194,6 +196,7 @@ func main() {
 	if err := (&controller.TorrentReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorderFor("Torrent"),
 		ClientPool: clientPool,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Torrent")
