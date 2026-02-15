@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	torrentv1alpha1 "github.com/guidonguido/qbittorrent-operator/api/v1alpha1"
@@ -60,6 +61,7 @@ var _ = Describe("Torrent Controller", func() {
 			controllerReconciler := &TorrentReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
+				Recorder:   record.NewFakeRecorder(10),
 				ClientPool: qbittorrent.NewClientPool(5 * time.Minute),
 			}
 
@@ -77,6 +79,7 @@ var _ = Describe("Torrent Controller", func() {
 			controllerReconciler := &TorrentReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
+				Recorder:   record.NewFakeRecorder(10),
 				ClientPool: qbittorrent.NewClientPool(5 * time.Minute),
 			}
 
@@ -145,6 +148,7 @@ var _ = Describe("Torrent Controller", func() {
 			controllerReconciler := &TorrentReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
+				Recorder:   record.NewFakeRecorder(10),
 				ClientPool: qbittorrent.NewClientPool(5 * time.Minute),
 			}
 
@@ -258,6 +262,7 @@ var _ = Describe("Torrent Controller", func() {
 			controllerReconciler := &TorrentReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
+				Recorder:   record.NewFakeRecorder(10),
 				ClientPool: qbittorrent.NewClientPool(5 * time.Minute),
 			}
 
@@ -351,6 +356,7 @@ var _ = Describe("Torrent Controller", func() {
 			controllerReconciler := &TorrentReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
+				Recorder:   record.NewFakeRecorder(10),
 				ClientPool: qbittorrent.NewClientPool(5 * time.Minute),
 			}
 

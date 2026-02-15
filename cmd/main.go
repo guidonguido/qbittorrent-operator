@@ -196,6 +196,7 @@ func main() {
 	if err := (&controller.TorrentReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorderFor("Torrent"),
 		ClientPool: clientPool,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Torrent")

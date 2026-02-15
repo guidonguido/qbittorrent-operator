@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -24,6 +25,7 @@ import (
 type TorrentReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
+	Recorder   record.EventRecorder
 	ClientPool *qbittorrent.ClientPool
 }
 
@@ -40,6 +42,7 @@ const TorrentFinalizer = "torrent.qbittorrent.io/finalizer"
 // +kubebuilder:rbac:groups=torrent.qbittorrent.io,resources=torrentclientconfigurations,verbs=get;list;watch
 // +kubebuilder:rbac:groups=torrent.qbittorrent.io,resources=torrentclientconfigurations/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *TorrentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -77,6 +80,8 @@ func (r *TorrentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusErr := r.Status().Update(ctx, torrent); statusErr != nil {
 			logger.Error(statusErr, "Failed to update Torrent status")
 		}
+		r.Recorder.Eventf(torrent, corev1.EventTypeWarning, "ClientResolutionFailed",
+			"Failed to resolve qBittorrent client for Torrent %q: %v", torrent.Name, err)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
@@ -84,6 +89,12 @@ func (r *TorrentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	logger.V(1).Info("Getting torrent hash from magnet URI", "MagnetURI", torrent.Spec.MagnetURI)
 	hash, err := qbittorrent.GetTorrentHash(torrent.Spec.MagnetURI)
 	if err != nil {
+		r.setDegradedCondition(torrent, "FailedToGetTorrentHash", err.Error())
+		if statusErr := r.Status().Update(ctx, torrent); statusErr != nil {
+			logger.Error(statusErr, "Failed to update Torrent status")
+		}
+		r.Recorder.Eventf(torrent, corev1.EventTypeWarning, "InvalidMagnetURI",
+			"Failed to get torrent hash from magnet URI %q: %v", torrent.Spec.MagnetURI, err)
 		logger.Error(err, "Failed to get torrent hash")
 		return ctrl.Result{}, err
 	}
@@ -96,6 +107,8 @@ func (r *TorrentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Status().Update(ctx, torrent); err != nil {
 			logger.Error(err, "Failed to update Torrent status")
 		}
+		r.Recorder.Eventf(torrent, corev1.EventTypeWarning, "FailedToGetTorrentInfo",
+			"Failed to get torrent info for Torrent %q: %v", torrent.Name, err)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -107,6 +120,8 @@ func (r *TorrentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			if err := r.Status().Update(ctx, torrent); err != nil {
 				logger.Error(err, "Failed to update Torrent status")
 			}
+			r.Recorder.Eventf(torrent, corev1.EventTypeWarning, "FailedToAddTorrent",
+				"Failed to add Torrent %q to qBittorrent: %v", torrent.Name, err)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
@@ -114,6 +129,11 @@ func (r *TorrentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Status().Update(ctx, torrent); err != nil {
 			logger.Error(err, "Failed to update Torrent status")
 		}
+
+		r.Recorder.Eventf(torrent, corev1.EventTypeNormal, "Added",
+			"Successfully added Torrent %q to qBittorrent", torrent.Name)
+		logger.Info("Successfully added Torrent to qBittorrent", "Name", torrent.Name)
+
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
@@ -140,11 +160,21 @@ func (r *TorrentReconciler) handleDeletion(ctx context.Context, torrent *torrent
 	logger := log.FromContext(ctx)
 	logger.Info("Handling Torrent Deletion", "Name", torrent.Name)
 
+	r.Recorder.Eventf(torrent, corev1.EventTypeNormal, "DeletionStarted", "Starting deletion of Torrent %q", torrent.Name)
+
 	if torrent.Status.Hash != "" {
 		// Resolve TCC to get a client for deletion
 		qbtClient, err := r.getQBTClient(ctx, torrent)
 		if err != nil {
-			logger.Error(err, "Failed to get qBittorrent client for deletion, removing finalizer anyway")
+			// In case of error, do not remove finalizer so we can retry deletion later, once the issue is resolved
+			logger.Error(err, "Failed to resolve qBittorrent client for deletion, will retry")
+			r.setDegradedCondition(torrent, "ClientResolutionFailed", fmt.Sprintf("Failed to resolve qBittorrent client for deletion: %v", err))
+			if statusErr := r.Status().Update(ctx, torrent); statusErr != nil {
+				logger.Error(statusErr, "Failed to update Torrent status")
+			}
+			r.Recorder.Eventf(torrent, corev1.EventTypeWarning, "ClientResolutionFailed",
+				"Failed to resolve qBittorrent client for deletion of Torrent %q: %v, will retry", torrent.Name, err)
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		} else {
 			deleteFiles := true
 			if torrent.Spec.DeleteFilesOnRemoval != nil {
@@ -158,8 +188,12 @@ func (r *TorrentReconciler) handleDeletion(ctx context.Context, torrent *torrent
 				if err := r.Status().Update(ctx, torrent); err != nil {
 					logger.Error(err, "Failed to update Torrent status")
 				}
+				r.Recorder.Eventf(torrent, corev1.EventTypeWarning, "FailedToDeleteTorrent",
+					"Failed to delete Torrent %q from qBittorrent: %v", torrent.Name, err)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
+			r.Recorder.Eventf(torrent, corev1.EventTypeNormal, "Deleted",
+				"Successfully deleted Torrent %q from qBittorrent", torrent.Name)
 			logger.Info("Successfully deleted Torrent from qBittorrent", "Name", torrent.Name)
 		}
 	}
