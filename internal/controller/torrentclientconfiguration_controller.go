@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -28,6 +29,7 @@ const (
 type TorrentClientConfigurationReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
+	Recorder   record.EventRecorder
 	ClientPool *qbittorrent.ClientPool
 }
 
@@ -35,6 +37,7 @@ type TorrentClientConfigurationReconciler struct {
 // +kubebuilder:rbac:groups=torrent.qbittorrent.io,resources=torrentclientconfigurations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=torrent.qbittorrent.io,resources=torrentclientconfigurations/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *TorrentClientConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -47,7 +50,6 @@ func (r *TorrentClientConfigurationReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. Parse check interval
 	checkInterval := 60 * time.Second
 	if tcc.Spec.CheckInterval != "" {
 		parsed, err := time.ParseDuration(tcc.Spec.CheckInterval)
@@ -58,16 +60,20 @@ func (r *TorrentClientConfigurationReconciler) Reconcile(ctx context.Context, re
 		}
 	}
 
-	// 4. Validate the creds Secret exists and has required keys
+	// 2. Validate the creds Secret exists and has required keys
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Name: tcc.Spec.CredentialsSecret.Name, Namespace: tcc.Namespace}, secret); err != nil {
 		r.setDegradedCondition(tcc, "SecretNotFound",
 			fmt.Sprintf("Credentials secret %q not found: %v", tcc.Spec.CredentialsSecret.Name, err))
 		tcc.Status.Connected = false
+		r.Recorder.Eventf(tcc, corev1.EventTypeWarning, "CredentialSecretError",
+			"Failed to get credentials secret %q: %v", tcc.Spec.CredentialsSecret.Name, err)
+
 		now := metav1.Now()
 		tcc.Status.LastChecked = &now
 		if statusErr := r.Status().Update(ctx, tcc); statusErr != nil {
 			logger.Error(statusErr, "Failed to update TCC status")
+			return ctrl.Result{RequeueAfter: checkInterval}, statusErr
 		}
 		return ctrl.Result{RequeueAfter: checkInterval}, nil
 	}
@@ -78,15 +84,19 @@ func (r *TorrentClientConfigurationReconciler) Reconcile(ctx context.Context, re
 		r.setDegradedCondition(tcc, "SecretInvalid",
 			fmt.Sprintf("Credentials secret %q missing 'username' or 'password' key", tcc.Spec.CredentialsSecret.Name))
 		tcc.Status.Connected = false
+		r.Recorder.Eventf(tcc, corev1.EventTypeWarning, "CredentialSecretInvalid",
+			"Credentials secret %q is invalid: missing 'username' or 'password' key", tcc.Spec.CredentialsSecret.Name)
+
 		now := metav1.Now()
 		tcc.Status.LastChecked = &now
 		if statusErr := r.Status().Update(ctx, tcc); statusErr != nil {
 			logger.Error(statusErr, "Failed to update TCC status")
+			return ctrl.Result{RequeueAfter: checkInterval}, statusErr
 		}
 		return ctrl.Result{RequeueAfter: checkInterval}, nil
 	}
 
-	// 5. Test connectivity to qBittorrent
+	// 3. Test connectivity to qBittorrent
 	qbtClient, err := r.ClientPool.GetOrCreate(
 		ctx,
 		tcc.Spec.URL,
@@ -97,31 +107,43 @@ func (r *TorrentClientConfigurationReconciler) Reconcile(ctx context.Context, re
 		r.setDegradedCondition(tcc, "ClientCreationFailed",
 			fmt.Sprintf("Failed to create qBittorrent client for %s: %v", tcc.Spec.URL, err))
 		tcc.Status.Connected = false
+		r.Recorder.Eventf(tcc, corev1.EventTypeWarning, "ClientCreationError",
+			"Failed to create qBittorrent client for %q: %v", tcc.Spec.URL, err)
+
 		now := metav1.Now()
 		tcc.Status.LastChecked = &now
 		if statusErr := r.Status().Update(ctx, tcc); statusErr != nil {
 			logger.Error(statusErr, "Failed to update TCC status")
+			return ctrl.Result{RequeueAfter: checkInterval}, statusErr
 		}
 		return ctrl.Result{RequeueAfter: checkInterval}, nil
 	}
 
-	// 6. Health check towards qBittorrent server
+	// 4. Health check towards qBittorrent server
 	if err := qbtClient.Ping(ctx); err != nil {
 		r.setDegradedCondition(tcc, "HealthCheckFailed",
 			fmt.Sprintf("qBittorrent health check failed at %s: %v", tcc.Spec.URL, err))
 		tcc.Status.Connected = false
+		r.Recorder.Eventf(tcc, corev1.EventTypeWarning, "HealthCheckError",
+			"qBittorrent health check failed for %q: %v", tcc.Spec.URL, err)
+
 		now := metav1.Now()
 		tcc.Status.LastChecked = &now
 		if statusErr := r.Status().Update(ctx, tcc); statusErr != nil {
 			logger.Error(statusErr, "Failed to update TCC status")
+			return ctrl.Result{RequeueAfter: checkInterval}, statusErr
 		}
 		return ctrl.Result{RequeueAfter: checkInterval}, nil
 	}
 
-	// 7. If previous checks passed, TCC is available
-	r.setAvailableCondition(tcc, "Connected",
-		fmt.Sprintf("Successfully connected to qBittorrent at %s", tcc.Spec.URL))
-	tcc.Status.Connected = true
+	// 5. If previous checks passed, TCC is available
+	if !meta.IsStatusConditionTrue(tcc.Status.Conditions, TypeAvailableTCC) {
+		r.setAvailableCondition(tcc, "Connected", fmt.Sprintf("Successfully connected to qBittorrent at %s", tcc.Spec.URL))
+		tcc.Status.Connected = true
+		r.Recorder.Eventf(tcc, corev1.EventTypeNormal, "Connected",
+			"Successfully connected to qBittorrent at %q", tcc.Spec.URL)
+	}
+
 	now := metav1.Now()
 	tcc.Status.LastChecked = &now
 
